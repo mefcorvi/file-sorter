@@ -35,14 +35,19 @@ namespace FileSorter
                 ushort bucket = 0;
                 int number = 0;
 
-                for (int i = 0; i < accessor.Capacity; i++)
+                for (int i = 0; i < items.Length; i++)
+                {
+                    items[i] = new List<FileItem>(1 << 16);
+                }
+
+                for (long i = 0; i < accessor.Capacity; i++)
                 {
                     byte b = accessor.ReadByte(i);
 
                     if (isNumber && b >= 48 && b < 58)
                     {
                         number *= 10;
-                        number += b;
+                        number += b - 48;
                     }
 
                     // we're reading a number but current char is a separator
@@ -63,11 +68,6 @@ namespace FileSorter
                     // reading a EOL
                     if (b == this.newLine[0])
                     {
-                        if (items[bucket] == null)
-                        {
-                            items[bucket] = new List<FileItem>(1 << 16);
-                        }
-
                         if (i < itemOffset + 5)
                         {
                             itemOffset = -1;
@@ -103,6 +103,8 @@ namespace FileSorter
 
                 items.Where(x => x != null).AsParallel().ForAll(x => x.Sort(comparer));
 
+                int linesWritten = 0;
+
                 using (var fs = new FileStream("result.txt", FileMode.Create))
                 using (var bs = new BufferedStream(fs))
                 {
@@ -126,10 +128,19 @@ namespace FileSorter
 
                                     if (item.Prefix > 0)
                                     {
-                                        bs.Write(BitConverter.GetBytes(item.Prefix));
+                                        var prefixBytes = BitConverter.GetBytes(item.Prefix);
+
+                                        for (int k = 0; k < prefixBytes.Length; k++)
+                                        {
+                                            if (prefixBytes[k] > 0)
+                                            {
+                                                bs.WriteByte(prefixBytes[k]);
+                                            }
+                                        }
                                     }
 
                                     bs.Write(this.newLine);
+                                    linesWritten++;
                                     continue;
                                 }
 
@@ -137,20 +148,24 @@ namespace FileSorter
                                 {
                                     b = accessor.ReadByte(itemOffset2);
                                     itemOffset2++;
-                                    bs.WriteByte(b);
 
                                     if (b == 13)
                                     {
+                                        bs.Write(this.newLine);
                                         break;
                                     }
+
+                                    bs.WriteByte(b);
                                 }
+
+                                linesWritten++;
                             }
                         }
                     }
                 }
-            }
 
-            Console.WriteLine($"Finished in {sw.ElapsedMilliseconds}ms");
+                Console.WriteLine($"Finished in {sw.ElapsedMilliseconds}ms, {linesWritten} lines written");
+            }
         }
     }
 

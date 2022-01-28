@@ -65,16 +65,12 @@ namespace FileSorter
 
         private void FillBuffer(Span<byte> buffer, ref int size)
         {
-            size = 0;
-            int number = this.random.Next();
+            string number = this.random.Next().ToString();
 
-            // it's ok to write number in reverse because this number is random
-            do
+            for (size = 0; size < number.Length; size++)
             {
-                buffer[size++] = (byte)(48 + number % 10);
-                number /= 10;
+                buffer[size] = (byte)number[size];
             }
-            while (number > 0);
 
             // Add separator ". "
             buffer[size++] = 46;
