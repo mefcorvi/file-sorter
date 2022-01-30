@@ -1,4 +1,5 @@
-﻿using System.Diagnostics;
+﻿using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.IO.MemoryMappedFiles;
 using System.Runtime.InteropServices;
@@ -13,7 +14,7 @@ namespace FileSorter
 
     public FileSorter(string fileName)
     {
-      this.newLine = System.Text.Encoding.ASCII.GetBytes(Environment.NewLine);
+      this.newLine = Encoding.ASCII.GetBytes(Environment.NewLine);
       this.fileName = fileName;
     }
 
@@ -23,6 +24,7 @@ namespace FileSorter
       sw.Start();
 
       var sortedFiles = new List<string>();
+      Task mergeSortTask = null;
 
       using (var file = MemoryMappedFile.CreateFromFile(this.fileName, FileMode.Open))
       {
@@ -55,8 +57,9 @@ namespace FileSorter
             Logger.Debug("Sorting lines...", $"offset={offset}");
             items.Where(x => x != null).AsParallel().ForAll(x => x.Sort(comparer));
 
-            Logger.Debug("Items has been sorted, writing to the temporary file...", $"offset={offset}");
-            sortedFiles.Add(WriteSortedLists(accessor, items));
+            Logger.Debug("Items has been sorted", $"offset={offset}");
+            var fileName = WriteSortedLists(accessor, items, token);
+            sortedFiles.Add(fileName);
 
             for (int i = 0; i < items.Length; i++)
             {
@@ -66,12 +69,23 @@ namespace FileSorter
         }
       }
 
+      if (!token.IsCancellationRequested)
+      {
+        var resultFile = sortedFiles
+          .AsParallel()
+          .WithCancellation(token)
+          .Aggregate((current, next) => ExternalMerge.Sort(current, next, token));
+
+        File.Move(resultFile, "./result.txt", true);
+        sortedFiles.Clear();
+      }
+
       DeleteTempFiles(sortedFiles);
 
       Console.WriteLine($"Finished in {sw.ElapsedMilliseconds}ms");
     }
 
-    private static void DeleteTempFiles(List<string> sortedFiles)
+    private static void DeleteTempFiles(IEnumerable<string> sortedFiles)
     {
       foreach (var item in sortedFiles)
       {
@@ -93,6 +107,7 @@ namespace FileSorter
       out long offset,
       CancellationToken token)
     {
+      int batchSize = 1 << 30;
       bool isNumber = true;
       uint prefix = 0;
       long itemOffset = -1;
@@ -104,30 +119,23 @@ namespace FileSorter
       {
         byte b = accessor.ReadByte(offset);
 
-        if (isNumber && b >= 48 && b < 58)
+        if (isNumber && b < 58 && b >= 48)
         {
           number *= 10;
           number += b - 48;
         }
-
-        // we're reading a number but current char is a separator
-        if (b == 46 && isNumber)
+        else if (isNumber && b == 46)
         {
-          if (token.IsCancellationRequested)
-          {
-            break;
-          }
-
+          // we're reading a number but current char is a separator
           isNumber = false;
           itemOffset = offset + 2;
 
           offset++;
-          continue;
         }
-
-        // reading a EOL
-        if (b == this.newLine[0])
+        else if (b == this.newLine[0])
         {
+          // we've reached EOL so add current item to the correct bucket
+          // and continue reading
           if (offset < itemOffset + 5)
           {
             itemOffset = -1;
@@ -144,25 +152,28 @@ namespace FileSorter
           isNumber = true;
 
           offset += this.newLine.Length - 1;
-
           linesRead++;
-          if (offset > 1 << 30)
+
+          if (offset >= batchSize)
           {
             break;
           }
 
-
-          continue;
+          if (token.IsCancellationRequested)
+          {
+            break;
+          }
         }
-
-        if (!isNumber)
+        else if (!isNumber && offset < itemOffset + 5)
         {
           if (offset < itemOffset + 1)
           {
+            // reading bucket
             bucket = b;
           }
-          else if (offset < itemOffset + 5)
+          else
           {
+            // reading prefix part
             prefix = prefix << 8;
             prefix += b;
           }
@@ -175,31 +186,38 @@ namespace FileSorter
     /// <summary>
     /// Writes sorted chunks into a file and returns path to this file.
     /// </summary>
-    private string WriteSortedLists(MemoryMappedViewAccessor accessor, List<FileItem>[] items)
+    private string WriteSortedLists(
+      MemoryMappedViewAccessor accessor,
+      List<FileItem>[] items,
+      CancellationToken token)
     {
       string fileName = Path.GetTempFileName();
       long linesWritten = 0;
 
-      using (var fs = new FileStream(fileName, FileMode.Create))
-      using (var bs = new BufferedStream(fs, 1 << 16))
+      using (var fs = new FileStream(fileName, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 16))
       {
         for (int i = 0; i < items.Length; i++)
         {
+          if (token.IsCancellationRequested)
+          {
+            break;
+          }
+
           if (items[i] != null)
           {
             for (int j = 0; j < items[i].Count; j++)
             {
               var item = items[i][j];
-              bs.Write(Encoding.ASCII.GetBytes(item.Number.ToString()));
-              bs.WriteByte(46);
-              bs.WriteByte(32);
+              fs.Write(Encoding.ASCII.GetBytes(item.Number.ToString()));
+              fs.WriteByte(46);
+              fs.WriteByte(32);
 
               var itemOffset2 = item.Offset > 0 ? item.Offset - 5 : -1;
               byte b = 0;
 
               if (itemOffset2 == -1)
               {
-                bs.WriteByte((byte)i);
+                fs.WriteByte((byte)i);
 
                 if (item.Prefix > 0)
                 {
@@ -209,13 +227,13 @@ namespace FileSorter
                   {
                     if (prefixBytes[k] > 0)
                     {
-                      bs.WriteByte(prefixBytes[k]);
+                      fs.WriteByte(prefixBytes[k]);
                     }
                   }
                 }
 
                 linesWritten++;
-                bs.Write(this.newLine);
+                fs.Write(this.newLine);
                 continue;
               }
 
@@ -227,11 +245,11 @@ namespace FileSorter
                 if (b == 13)
                 {
                   linesWritten++;
-                  bs.Write(this.newLine);
+                  fs.Write(this.newLine);
                   break;
                 }
 
-                bs.WriteByte(b);
+                fs.WriteByte(b);
               }
             }
           }
