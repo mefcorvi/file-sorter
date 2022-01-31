@@ -30,6 +30,8 @@ namespace FileSorter
       var sortedFiles = new ConcurrentStack<string>();
       var sortTasks = new List<Task>();
 
+      long inputFileSize = new FileInfo(fileName).Length;
+
       using (var file = MemoryMappedFile.CreateFromFile(this.fileName, FileMode.Open, null, 0, MemoryMappedFileAccess.Read))
       {
         var items = new List<FileItem>[256];
@@ -41,7 +43,7 @@ namespace FileSorter
 
         long offset = 0;
 
-        while (!token.IsCancellationRequested)
+        while (!token.IsCancellationRequested && offset < inputFileSize)
         {
           using (var accessor = file.CreateViewAccessor(offset, 0, MemoryMappedFileAccess.Read))
           {
@@ -156,7 +158,7 @@ namespace FileSorter
 
           offset++;
         }
-        else if (b == this.newLine[0])
+        else if (b == this.newLine[0] || b == 0)
         {
           // we've reached EOL so add current item to the correct bucket
           // and continue reading
@@ -174,9 +176,14 @@ namespace FileSorter
           bucket = 0;
           number = 0;
           isNumber = true;
+          linesRead++;
+
+          if (b == 0)
+          {
+            break;
+          }
 
           offset += this.newLine.Length - 1;
-          linesRead++;
 
           if (offset >= chunkSize)
           {
@@ -278,7 +285,7 @@ namespace FileSorter
                 b = accessor.ReadByte(itemOffset2);
                 itemOffset2++;
 
-                if (b == 13)
+                if (b == this.newLine[0] || b == 0)
                 {
                   linesWritten++;
                   fs.Write(this.newLine);

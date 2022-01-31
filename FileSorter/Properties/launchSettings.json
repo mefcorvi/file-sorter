@@ -2,7 +2,7 @@
   "profiles": {
     "FileSorter": {
       "commandName": "Project",
-      "commandLineArgs": "sort"
+      "commandLineArgs": "sort -c 100kb"
     }
   }
 }
