@@ -158,7 +158,7 @@ namespace FileSorter
 
           offset++;
         }
-        else if (b == this.newLine[0] || b == 0)
+        else if (b == this.newLine[0])
         {
           // we've reached EOL so add current item to the correct bucket
           // and continue reading
@@ -176,14 +176,9 @@ namespace FileSorter
           bucket = 0;
           number = 0;
           isNumber = true;
-          linesRead++;
-
-          if (b == 0)
-          {
-            break;
-          }
 
           offset += this.newLine.Length - 1;
+          linesRead++;
 
           if (offset >= chunkSize)
           {
@@ -285,7 +280,7 @@ namespace FileSorter
                 b = accessor.ReadByte(itemOffset2);
                 itemOffset2++;
 
-                if (b == this.newLine[0] || b == 0)
+                if (b == this.newLine[0])
                 {
                   linesWritten++;
                   fs.Write(this.newLine);
