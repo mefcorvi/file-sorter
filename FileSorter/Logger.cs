@@ -1,17 +1,14 @@
 ﻿using System;
+using System.Diagnostics;
 
 public static class Logger
 {
-  private static DateTime LastTime = DateTime.Now;
+  private static readonly Stopwatch Stopwatch = Stopwatch.StartNew();
 
-  public static void Debug(string msg, string? param = null)
+  public static void Write(string msg, string? param = null)
   {
-    var now = DateTime.Now;
-    double timeDiff = Math.Max((now - Logger.LastTime).TotalMilliseconds, 0);
-    Logger.LastTime = now;
-
     string addon = param != null ? $" | {param}" : "";
 
-    Console.WriteLine($"DEBUG | {timeDiff}ms | {msg}{addon}");
+    Console.WriteLine($"{Logger.Stopwatch.Elapsed.ToString("g")} | {msg}{addon}");
   }
 }

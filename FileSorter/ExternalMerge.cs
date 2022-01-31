@@ -1,10 +1,6 @@
-﻿using System;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Linq;
+﻿using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
-using System.Threading.Tasks;
 
 namespace FileSorter
 {
@@ -17,13 +13,14 @@ namespace FileSorter
       string file2,
       CancellationToken token)
     {
-      Logger.Debug("Merging files", $"file1={file1} file2={file2}");
+      Logger.Write("Merging files", $"file1={file1} file2={file2}");
       string resultFile = Path.GetTempFileName();
+      var stopwatch = Stopwatch.StartNew();
 
       try
       {
-        InternalSort(file1, file2, resultFile, token);
-        Logger.Debug("Files have been merged", $"file1={file1} file2={file2} output={resultFile}");
+        var resultSize = InternalSort(file1, file2, resultFile, token);
+        Logger.Write("Files have been merged", $"file1={file1} file2={file2} output={resultFile} size={resultSize} duration={stopwatch.ElapsedMilliseconds}ms");
       }
       catch
       {
@@ -38,7 +35,7 @@ namespace FileSorter
       return resultFile;
     }
 
-    private static void InternalSort(
+    private static long InternalSort(
       string file1,
       string file2,
       string outputFile,
@@ -50,9 +47,9 @@ namespace FileSorter
       int number1;
       int number2;
 
-      using (var fs = new FileStream(outputFile, FileMode.Create, FileAccess.Write))
-      using (var fs1 = new FileStream(file1, FileMode.Open, FileAccess.Read))
-      using (var fs2 = new FileStream(file2, FileMode.Open, FileAccess.Read))
+      using (var fs = OpenWriteStream(outputFile))
+      using (var fs1 = OpenReadStream(file1))
+      using (var fs2 = OpenReadStream(file2))
       {
         ReadLine(fs1, out number1, buffer1);
         ReadLine(fs2, out number2, buffer2);
@@ -66,13 +63,19 @@ namespace FileSorter
 
           if (buffer2.Count == 0)
           {
+            // write current buffer
             WriteLine(fs, number1, buffer1);
-            ReadLine(fs1, out number1, buffer1);
+
+            // copy rest of the file
+            fs1.CopyTo(fs);
           }
           else if (buffer1.Count == 0)
           {
+            // write current buffer
             WriteLine(fs, number2, buffer2);
-            ReadLine(fs2, out number2, buffer2);
+
+            // copy rest of the file
+            fs2.CopyTo(fs);
           }
           else
           {
@@ -92,7 +95,31 @@ namespace FileSorter
             }
           }
         }
+
+        return fs.Length;
       }
+    }
+
+    private static FileStream OpenWriteStream(string outputFile)
+    {
+      return new FileStream(
+        outputFile,
+        FileMode.Create,
+        FileAccess.Write,
+        FileShare.None,
+        1 << 16
+      );
+    }
+
+    private static FileStream OpenReadStream(string file1)
+    {
+      return new FileStream(
+        file1,
+        FileMode.Open,
+        FileAccess.Read,
+        FileShare.None,
+        1 << 16,
+        FileOptions.SequentialScan);
     }
 
     private static void WriteLine(Stream s, int number, List<byte> buffer)
@@ -131,8 +158,13 @@ namespace FileSorter
           isNumber = false;
           s.ReadByte();
         }
-        else if (b == 13 || b == 10)
+        else if (b == newLine[0])
         {
+          for (int i = 1; i < newLine.Length; i++)
+          {
+            s.ReadByte();
+          }
+
           if (!isNumber)
           {
             return;

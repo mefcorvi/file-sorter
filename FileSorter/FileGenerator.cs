@@ -37,13 +37,12 @@ namespace FileSorter
           $"Target file name is \"{this.fileName}\", " +
           $"target size is {this.fileSize} bytes");
 
+      var stopwatch = Stopwatch.StartNew();
+
+      long linesCount = 0;
       var buffer = new byte[this.maxLineSize];
       int bufferSize = 0;
       long currentSize = 0;
-      long linesCount = 0;
-
-      var stopwatch = new Stopwatch();
-      stopwatch.Start();
 
       using (var stream = new FileStream(
         this.fileName,
@@ -69,7 +68,10 @@ namespace FileSorter
 
     private void FillBuffer(Span<byte> buffer, ref int size)
     {
-      string number = this.random.Next().ToString();
+      var newLine = this.newLine;
+      var random = this.random;
+      var maxLineSize = this.maxLineSize;
+      string number = random.Next().ToString();
 
       for (size = 0; size < number.Length; size++)
       {
@@ -80,17 +82,17 @@ namespace FileSorter
       buffer[size++] = 46;
       buffer[size++] = 32;
 
-      int stringSize = this.random.Next(size + 1, this.maxLineSize - this.newLine.Length);
+      int stringSize = random.Next(size + 1, maxLineSize - newLine.Length);
 
       while (size < stringSize)
       {
         // write capitalized letters
-        buffer[size++] = (byte)this.random.Next(65, 91);
+        buffer[size++] = (byte)random.Next(65, 91);
       }
 
-      for (int i = 0; i < this.newLine.Length; i++)
+      for (int i = 0; i < newLine.Length; i++)
       {
-        buffer[size++] = this.newLine[i];
+        buffer[size++] = newLine[i];
       }
     }
   }

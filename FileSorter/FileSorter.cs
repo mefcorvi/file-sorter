@@ -1,32 +1,36 @@
 ﻿using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Diagnostics.CodeAnalysis;
 using System.IO.MemoryMappedFiles;
-using System.Runtime.InteropServices;
 using System.Text;
 
 namespace FileSorter
 {
   internal sealed class FileSorter
   {
+    private readonly long chunkSize;
     private readonly string fileName;
+    private readonly string resultFile;
     private readonly byte[] newLine;
 
-    public FileSorter(string fileName)
+    public FileSorter(string fileName, string resultFile, long chunkSize)
     {
       this.newLine = Encoding.ASCII.GetBytes(Environment.NewLine);
       this.fileName = fileName;
+      this.resultFile = resultFile;
+      this.chunkSize = chunkSize;
     }
 
     public async ValueTask SortAsync(CancellationToken token = default(CancellationToken))
     {
+      Logger.Write("Sorting the file", $"input={this.fileName} output={this.resultFile} chunkSize={this.chunkSize}");
+
       var sw = new Stopwatch();
       sw.Start();
 
-      var sortedFiles = new List<string>();
-      Task mergeSortTask = null;
+      var sortedFiles = new ConcurrentStack<string>();
+      var sortTasks = new List<Task>();
 
-      using (var file = MemoryMappedFile.CreateFromFile(this.fileName, FileMode.Open))
+      using (var file = MemoryMappedFile.CreateFromFile(this.fileName, FileMode.Open, null, 0, MemoryMappedFileAccess.Read))
       {
         var items = new List<FileItem>[256];
 
@@ -48,18 +52,34 @@ namespace FileSorter
 
             var comparer = new OffsetComparer(accessor);
 
-            Logger.Debug("Reading batch", $"offset={offset}");
-            long batchOffset = 0;
+            Logger.Write("Reading a chunk...", $"offset={offset}");
+            long chunkOffset = 0;
+            long linesRead = 0;
 
-            ReadLines(accessor, items, out batchOffset, token);
-            offset += batchOffset;
+            ReadLines(accessor, items, out chunkOffset, out linesRead, token);
+            offset += chunkOffset;
 
-            Logger.Debug("Sorting lines...", $"offset={offset}");
-            items.Where(x => x != null).AsParallel().ForAll(x => x.Sort(comparer));
+            if (linesRead > 0)
+            {
+              Logger.Write("Sorting items...", $"offset={offset}");
+              items.Where(x => x != null).AsParallel().ForAll(x => x.Sort(comparer));
 
-            Logger.Debug("Items has been sorted", $"offset={offset}");
-            var fileName = WriteSortedLists(accessor, items, token);
-            sortedFiles.Add(fileName);
+              Logger.Write("Items have been sorted", $"offset={offset}");
+              var fileName = WriteSortedLists(accessor, items, token);
+
+              if (sortedFiles.TryPop(out var prevFile))
+              {
+                var sortTask = Task.Factory.StartNew(() =>
+                {
+                  sortedFiles.Push(ExternalMerge.Sort(fileName, prevFile, token));
+                }, TaskCreationOptions.LongRunning);
+                sortTasks.Add(sortTask);
+              }
+              else
+              {
+                sortedFiles.Push(fileName);
+              }
+            }
 
             for (int i = 0; i < items.Length; i++)
             {
@@ -69,6 +89,8 @@ namespace FileSorter
         }
       }
 
+      await Task.WhenAll(sortTasks);
+
       if (!token.IsCancellationRequested)
       {
         var resultFile = sortedFiles
@@ -76,13 +98,14 @@ namespace FileSorter
           .WithCancellation(token)
           .Aggregate((current, next) => ExternalMerge.Sort(current, next, token));
 
-        File.Move(resultFile, "./result.txt", true);
+        File.Move(resultFile, this.resultFile, true);
+        Logger.Write($"Result file has been generated", $"fileName={this.resultFile}");
         sortedFiles.Clear();
       }
 
       DeleteTempFiles(sortedFiles);
 
-      Console.WriteLine($"Finished in {sw.ElapsedMilliseconds}ms");
+      Logger.Write($"Finished in {sw.ElapsedMilliseconds}ms");
     }
 
     private static void DeleteTempFiles(IEnumerable<string> sortedFiles)
@@ -92,11 +115,11 @@ namespace FileSorter
         try
         {
           File.Delete(item);
-          Logger.Debug("Temp file has been deleted", $"fileName={item}");
+          Logger.Write("Temp file has been deleted", $"fileName={item}");
         }
         catch (Exception err)
         {
-          Logger.Debug("Failed to delete temp file", $"fileName={item} error={err}");
+          Logger.Write("Failed to delete temp file", $"fileName={item} error={err}");
         }
       }
     }
@@ -105,15 +128,16 @@ namespace FileSorter
       MemoryMappedViewAccessor accessor,
       List<FileItem>[] items,
       out long offset,
+      out long linesRead,
       CancellationToken token)
     {
-      int batchSize = 1 << 30;
+      long chunkSize = this.chunkSize;
       bool isNumber = true;
       uint prefix = 0;
       long itemOffset = -1;
       ushort bucket = 0;
       int number = 0;
-      long linesRead = 0;
+      linesRead = 0;
 
       for (offset = 0; offset < accessor.Capacity; offset++)
       {
@@ -154,7 +178,7 @@ namespace FileSorter
           offset += this.newLine.Length - 1;
           linesRead++;
 
-          if (offset >= batchSize)
+          if (offset >= chunkSize)
           {
             break;
           }
@@ -180,7 +204,7 @@ namespace FileSorter
         }
       }
 
-      Logger.Debug("Batch has been read", $"offset={offset} linesCount={linesRead}");
+      Logger.Write("Chunk has been read", $"offset={offset} linesCount={linesRead}");
     }
 
     /// <summary>
@@ -194,7 +218,13 @@ namespace FileSorter
       string fileName = Path.GetTempFileName();
       long linesWritten = 0;
 
-      using (var fs = new FileStream(fileName, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 16))
+      using (var fs = new FileStream(
+        fileName,
+        FileMode.Create,
+        FileAccess.Write,
+        FileShare.None,
+        1 << 16,
+        false))
       {
         for (int i = 0; i < items.Length; i++)
         {
@@ -208,7 +238,13 @@ namespace FileSorter
             for (int j = 0; j < items[i].Count; j++)
             {
               var item = items[i][j];
-              fs.Write(Encoding.ASCII.GetBytes(item.Number.ToString()));
+              var number = item.Number.ToString();
+
+              for (int k = 0; k < number.Length; k++)
+              {
+                fs.WriteByte((byte)number[k]);
+              }
+
               fs.WriteByte(46);
               fs.WriteByte(32);
 
@@ -256,7 +292,7 @@ namespace FileSorter
         }
       }
 
-      Logger.Debug("Temporary files has been created", $"linesWritten={linesWritten} fileName={fileName}");
+      Logger.Write("Temporary files have been created", $"linesWritten={linesWritten} fileName={fileName}");
       return fileName;
     }
   }
